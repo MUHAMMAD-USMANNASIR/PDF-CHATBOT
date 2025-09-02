@@ -44,11 +44,24 @@ def embed_chunks(chunks):
         embeddings.append(np.mean(emb, axis=0))  # pool to single vector
     return np.array(embeddings)
 
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+
 def search_chunks(query, chunks, embeddings, top_k=5):
-    query_emb = np.mean(emb_model(query)[0][0], axis=0)
-    sims = cosine_similarity([query_emb], embeddings)[0]
-    top_idx = sims.argsort()[-top_k:][::-1]
-    return [chunks[i] for i in top_idx]
+    # Encode query into embedding
+    query_emb = embeddings.encode([query])[0]
+
+    # Ensure both are 2D arrays
+    query_emb = np.array(query_emb).reshape(1, -1)
+    doc_embs = np.array(embeddings.encode(chunks))
+
+    # Compute cosine similarity
+    sims = cosine_similarity(query_emb, doc_embs)[0]
+
+    # Get top k indices
+    top_indices = np.argsort(sims)[-top_k:][::-1]
+    return [chunks[i] for i in top_indices]
+
 
 # -------------------------------
 # Answer generation
