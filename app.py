@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import tempfile
 import PyPDF2
-import openai
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -22,7 +21,8 @@ def load_pdf(pdf_file):
     pdf_reader = PyPDF2.PdfReader(pdf_file)
     text = ""
     for page in pdf_reader.pages:
-        text += page.extract_text() + "\n"
+        if page.extract_text():
+            text += page.extract_text() + "\n"
     return text
 
 def split_text(text, chunk_size=500):
@@ -38,28 +38,19 @@ def build_faiss_index(chunks):
     index.add(embeddings)
     return index, embeddings
 
-def search_chunks(query, chunks, embeddings, top_k=3):
-    """Retrieve most relevant chunks for a query."""
-    query_vec = embedding_model.encode([query], convert_to_numpy=True)
-    scores, indices = embeddings.search(query_vec, top_k)
-    return [chunks[i] for i in indices[0]]
-
 def generate_answer(query, chunks, faiss_index, mode="concise"):
     """Generate final answer using retriever + QA model."""
-    # Retrieve relevant chunks
     query_vec = embedding_model.encode([query], convert_to_numpy=True)
     scores, indices = faiss_index.search(query_vec, 3)
     relevant_chunks = [chunks[i] for i in indices[0]]
     context = " ".join(relevant_chunks)
 
-    # Extract short answer from context
     try:
         result = qa_pipeline(question=query, context=context)
         answer = result["answer"]
     except Exception:
         answer = "Sorry, I couldn’t find an exact answer."
 
-    # Return based on mode
     if mode == "concise":
         return answer
     else:
@@ -69,7 +60,7 @@ def generate_answer(query, chunks, faiss_index, mode="concise"):
 # Streamlit UI
 # -------------------------
 def main():
-    st.title("📄 PDF Q&A Bot (Retriever + QA Model)")
+    st.title("📄 PDF Q&A Bot (Local Models, No API)")
 
     uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
     if uploaded_file:
@@ -77,14 +68,12 @@ def main():
             tmp_file.write(uploaded_file.read())
             tmp_path = tmp_file.name
 
-        # Extract & process PDF
         text = load_pdf(tmp_path)
         chunks = split_text(text)
         faiss_index, _ = build_faiss_index(chunks)
 
         st.success("✅ PDF processed successfully!")
 
-        # Query input
         query = st.text_input("Ask a question about your PDF:")
         mode = st.radio("Answer Mode:", ["concise", "deep"])
 
