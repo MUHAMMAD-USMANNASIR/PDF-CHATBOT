@@ -11,7 +11,7 @@ from transformers import pipeline
 @st.cache_resource
 def load_models():
     embeddings = SentenceTransformer("all-MiniLM-L6-v2")
-    deep_generator = pipeline("text2text-generation", model="facebook/bart-large-cnn")
+    deep_generator = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
     precise_generator = pipeline("question-answering", model="deepset/roberta-base-squad2")
     return embeddings, deep_generator, precise_generator
 
@@ -76,8 +76,8 @@ def generate_answer(query, chunks, index, embeddings, mode="deep"):
 # Streamlit UI
 # -------------------------
 def main():
-    st.title("PDF Q&A System (Dual Mode)")
-    st.write("Upload a PDF and ask questions. Choose between **Deep (ChatGPT-like)** or **Precise (Direct)** answers.")
+    st.title("PDF Q&A System")
+    st.write("Upload a PDF and ask questions. Choose between Deep or Precise answers.")
 
     uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
