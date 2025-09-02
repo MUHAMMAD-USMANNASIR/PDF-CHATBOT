@@ -2,18 +2,13 @@ import streamlit as st
 import fitz  # PyMuPDF
 from sentence_transformers import SentenceTransformer
 import numpy as np
-from transformers import pipeline
 
 # ----------------------------
-# 1. Load models (cached)
+# 1. Load embedding model
 # ----------------------------
 @st.cache_resource
 def load_embeddings():
     return SentenceTransformer("all-MiniLM-L6-v2")
-
-@st.cache_resource
-def load_summarizer():
-    return pipeline("summarization", model="t5-small")
 
 # ----------------------------
 # 2. Extract text from PDF
@@ -40,7 +35,7 @@ def build_embeddings(chunks, model):
     return vectors
 
 # ----------------------------
-# 5. Search chunks
+# 5. Search relevant chunks
 # ----------------------------
 def search_chunks(query, chunks, embeddings, model, top_k=3):
     query_vec = model.encode([query], convert_to_tensor=True).cpu().numpy()[0]
@@ -51,24 +46,17 @@ def search_chunks(query, chunks, embeddings, model, top_k=3):
     return [chunks[i] for i in top_ids]
 
 # ----------------------------
-# 6. Generate answer
+# 6. Generate answer (retrieval only)
 # ----------------------------
-def generate_answer(query, chunks, embeddings, embed_model, summarizer, mode="concise"):
+def generate_answer(query, chunks, embeddings, embed_model, mode="concise"):
     relevant_chunks = search_chunks(query, chunks, embeddings, embed_model, top_k=3)
-    context = " ".join(relevant_chunks)
-
+    
     if mode == "concise":
-        summary = summarizer(
-            context, max_length=50, min_length=15, do_sample=False
-        )[0]["summary_text"]
-        return f"Answer: {summary}"
-
+        return f"Answer (from PDF): {relevant_chunks[0]}"
+    
     elif mode == "deep":
-        summary = summarizer(
-            context, max_length=120, min_length=50, do_sample=False
-        )[0]["summary_text"]
-        return f"Answer: {summary}\n\n(Context from PDF: {context})"
-
+        return "Answer (from PDF):\n\n" + "\n\n".join(relevant_chunks)
+    
     else:
         return "❌ Invalid mode."
 
@@ -76,7 +64,7 @@ def generate_answer(query, chunks, embeddings, embed_model, summarizer, mode="co
 # 7. Streamlit UI
 # ----------------------------
 def main():
-    st.title("📄 PDF Q&A Bot (Retriever + Summarizer)")
+    st.title("📄 PDF Q&A Bot (Retriever Only)")
 
     uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
@@ -86,7 +74,6 @@ def main():
 
         chunks = chunk_text(pdf_text, chunk_size=500)
         embed_model = load_embeddings()
-        summarizer = load_summarizer()
 
         with st.spinner("Building embeddings..."):
             embeddings = build_embeddings(chunks, embed_model)
@@ -97,8 +84,8 @@ def main():
         mode = st.radio("Answer Mode:", ["concise", "deep"])
 
         if query:
-            with st.spinner("Searching & summarizing..."):
-                answer = generate_answer(query, chunks, embeddings, embed_model, summarizer, mode)
+            with st.spinner("Searching..."):
+                answer = generate_answer(query, chunks, embeddings, embed_model, mode)
             st.write(answer)
 
 if __name__ == "__main__":
