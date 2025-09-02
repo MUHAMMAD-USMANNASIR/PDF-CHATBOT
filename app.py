@@ -1,91 +1,68 @@
 import streamlit as st
-import fitz  # PyMuPDF
-from sentence_transformers import SentenceTransformer
-from transformers import pipeline
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+import PyPDF2
+from sentence_transformers import SentenceTransformer, util
+import torch
 
+# Load embedding model once (small, memory-friendly)
+@st.cache_resource
+def load_embeddings():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-# -----------------------------
-# PDF LOADING & CHUNKING
-# -----------------------------
-def load_pdf(file):
-    doc = fitz.open(stream=file.read(), filetype="pdf")
+# Extract text from PDF
+def extract_text_from_pdf(uploaded_file):
+    pdf_reader = PyPDF2.PdfReader(uploaded_file)
     text = ""
-    for page in doc:
-        text += page.get_text("text")
+    for page in pdf_reader.pages:
+        text += page.extract_text() or ""
     return text
 
-
+# Split text into chunks
 def chunk_text(text, chunk_size=500):
     words = text.split()
-    return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
+# Search top-k relevant chunks
+def search_chunks(query, chunks, embeddings, top_k=3):
+    chunk_embs = embeddings.encode(chunks, convert_to_tensor=True)
+    query_emb = embeddings.encode(query, convert_to_tensor=True)
+    hits = util.semantic_search(query_emb, chunk_embs, top_k=top_k)[0]
+    return [chunks[hit['corpus_id']] for hit in hits]
 
-# -----------------------------
-# EMBEDDINGS & SEARCH
-# -----------------------------
-def embed_chunks(chunks, model):
-    return model.encode(chunks)
-
-
-def search_chunks(query, chunks, embeddings, model, top_k=5):
-    # Encode query
-    query_emb = model.encode([query])
-
-    # Similarity
-    sims = cosine_similarity(query_emb, embeddings)[0]
-
-    # Top-k
-    top_indices = np.argsort(sims)[-top_k:][::-1]
-    return [chunks[i] for i in top_indices]
-
-
-# -----------------------------
-# ANSWER GENERATION
-# -----------------------------
+# Generate answers
 def generate_answer(query, chunks, embeddings, mode="concise"):
-    # Step 1: find most relevant chunks
-    relevant_chunks = search_chunks(query, chunks, embeddings, top_k=5)
-    context = " ".join(relevant_chunks).strip()
-
-    # Step 2: answer ONLY from context
-    if not context:
-        return "Sorry, no relevant answer found in the PDF."
+    relevant_chunks = search_chunks(query, chunks, embeddings, top_k=3)
+    context = " ".join(relevant_chunks)
 
     if mode == "concise":
-        return f"Answer (concise, from PDF): {context[:400]}..."
-    else:  # deep mode
-        return f"Answer (detailed, from PDF):\n\n{context}"
+        return f"Answer (concise): Based on the PDF, {context[:300]}..."
+    elif mode == "deep":
+        return f"Answer (deep): The document discusses in detail: {context}"
+    else:
+        return "Invalid mode selected."
 
-
-
-# -----------------------------
-# STREAMLIT APP
-# -----------------------------
+# -------------------- Streamlit UI -------------------- #
 def main():
+    st.set_page_config(page_title="PDF Q&A Bot", layout="wide")
     st.title("📘 PDF Q&A Chatbot")
-    st.write("Upload a PDF and ask questions from it!")
 
     uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
 
     if uploaded_file:
-        text = load_pdf(uploaded_file)
-        st.success("PDF loaded successfully!")
+        with st.spinner("Reading and processing PDF..."):
+            text = extract_text_from_pdf(uploaded_file)
+            chunks = chunk_text(text)
+            embeddings = load_embeddings()
 
-        chunks = chunk_text(text)
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        embeddings = embed_chunks(chunks, model)
+        st.success("✅ PDF processed! Ask questions below:")
 
-        query = st.text_input("Ask a question about the PDF:")
-        mode = st.radio("Select answer mode:", ["concise", "deep"])
+        query = st.text_input("Enter your question:")
+        mode = st.radio("Select answer mode:", ["concise", "deep"], horizontal=True)
 
-        if st.button("Get Answer") and query:
+        if query:
             with st.spinner("Generating answer..."):
-                answer = generate_answer(query, chunks, embeddings, model, mode.lower())
-                st.write("### Answer:")
-                st.write(answer)
-
+                answer = generate_answer(query, chunks, embeddings, mode.lower())
+            st.subheader("💡 Answer")
+            st.write(answer)
 
 if __name__ == "__main__":
     main()
