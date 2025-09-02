@@ -1,101 +1,97 @@
 import streamlit as st
-import faiss
-import numpy as np
-from PyPDF2 import PdfReader
-from sentence_transformers import SentenceTransformer
+import fitz  # PyMuPDF
 from transformers import pipeline
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import re
 
-# -------------------------
-# Load Models Once (cached)
-# -------------------------
+# -------------------------------
+# Load models
+# -------------------------------
 @st.cache_resource
 def load_models():
-    embeddings = SentenceTransformer("all-MiniLM-L6-v2")
-    deep_generator = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
-    precise_generator = pipeline("question-answering", model="deepset/roberta-base-squad2")
-    return embeddings, deep_generator, precise_generator
+    qa_model = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
+    deep_model = pipeline("text2text-generation", model="google/flan-t5-small")
+    emb_model = pipeline("feature-extraction", model="sentence-transformers/all-MiniLM-L6-v2")
+    return qa_model, deep_model, emb_model
 
-embeddings, deep_generator, precise_generator = load_models()
+qa_model, deep_model, emb_model = load_models()
 
-# -------------------------
-# PDF Processing
-# -------------------------
-def load_pdf(file):
-    pdf = PdfReader(file)
+# -------------------------------
+# PDF text extraction
+# -------------------------------
+def extract_text_from_pdf(uploaded_file):
     text = ""
-    for page in pdf.pages:
-        text += page.extract_text() + "\n"
+    with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
+        for page in doc:
+            text += page.get_text("text")
     return text
 
-def chunk_text(text, chunk_size=400, overlap=100):
+def clean_text(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+def chunk_text(text, chunk_size=500):
     words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
-    return chunks
+    return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-# -------------------------
-# Embedding + FAISS
-# -------------------------
-def create_faiss_index(chunks, embeddings):
-    vectors = embeddings.encode(chunks)
-    dim = vectors.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(vectors, dtype="float32"))
-    return index, vectors
+# -------------------------------
+# Embedding functions
+# -------------------------------
+def embed_chunks(chunks):
+    embeddings = []
+    for ch in chunks:
+        emb = emb_model(ch)[0][0]  # extract vector
+        embeddings.append(np.mean(emb, axis=0))  # pool to single vector
+    return np.array(embeddings)
 
-def retrieve_relevant_chunks(query, chunks, index, embeddings, k=5):
-    query_vec = embeddings.encode([query])
-    distances, indices = index.search(np.array(query_vec, dtype="float32"), k)
-    return [chunks[i] for i in indices[0] if i < len(chunks)]
+def search_chunks(query, chunks, embeddings, top_k=5):
+    query_emb = np.mean(emb_model(query)[0][0], axis=0)
+    sims = cosine_similarity([query_emb], embeddings)[0]
+    top_idx = sims.argsort()[-top_k:][::-1]
+    return [chunks[i] for i in top_idx]
 
-# -------------------------
-# Answer Generation
-# -------------------------
-def generate_answer(query, chunks, index, embeddings, mode="deep"):
-    retrieved_chunks = retrieve_relevant_chunks(query, chunks, index, embeddings)
-    context = " ".join(retrieved_chunks)[:2000]  # keep short for accuracy
+# -------------------------------
+# Answer generation
+# -------------------------------
+def generate_answer(query, chunks, embeddings, mode="concise"):
+    relevant_chunks = search_chunks(query, chunks, embeddings, top_k=5)
+    context = " ".join(relevant_chunks)
 
-    if not context.strip():
-        return "No relevant information found in the document."
+    if mode == "concise":
+        result = qa_model({"question": query, "context": context})
+        return result["answer"]
 
-    if mode == "deep":
-        prompt = f"Answer the question based only on the following text:\n\n{context}\n\nQuestion: {query}\nAnswer:"
-        output = deep_generator(prompt, max_length=300, num_return_sequences=1, do_sample=False)[0]["generated_text"]
+    elif mode == "deep":
+        prompt = f"Answer the question in detail using the context.\n\nContext: {context}\n\nQuestion: {query}\nAnswer:"
+        output = deep_model(prompt, max_length=300, do_sample=False)[0]["generated_text"]
         return output.strip()
 
-    elif mode == "precise":
-        result = precise_generator(question=query, context=context)
-        return result["answer"].strip()
-
-    else:
-        return "Invalid mode selected. Choose 'deep' or 'precise'."
-
-# -------------------------
+# -------------------------------
 # Streamlit UI
-# -------------------------
+# -------------------------------
 def main():
-    st.title("PDF Q&A System")
-    st.write("Upload a PDF and ask questions. Choose between Deep or Precise answers.")
+    st.set_page_config(page_title="PDF Q/A Chatbot", layout="wide")
+    st.title("📑 PDF Q/A Chatbot")
 
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+    uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+    if uploaded_file:
+        text = extract_text_from_pdf(uploaded_file)
+        cleaned = clean_text(text)
+        chunks = chunk_text(cleaned, chunk_size=500)
+        embeddings = embed_chunks(chunks)
 
-    if uploaded_file is not None:
-        text = load_pdf(uploaded_file)
-        chunks = chunk_text(text)
-        index, vectors = create_faiss_index(chunks, embeddings)
+        st.success("✅ PDF processed! Ask your questions below.")
 
-        st.success("PDF processed successfully! You can now ask questions.")
+        mode = st.radio("Answer Mode:", ["Concise", "Deep"], horizontal=True)
+        query = st.text_input("Enter your question:")
 
-        mode = st.radio("Select Answer Mode:", ["deep", "precise"], horizontal=True)
-
-        query = st.text_input("Ask a question about the PDF:")
-        if query:
-            with st.spinner("Generating answer..."):
-                answer = generate_answer(query, chunks, index, embeddings, mode=mode)
-            st.subheader("Answer:")
-            st.write(answer)
+        if st.button("Get Answer"):
+            if query:
+                answer = generate_answer(query, chunks, embeddings, mode.lower())
+                st.subheader("Answer:")
+                st.write(answer)
+            else:
+                st.warning("Please enter a question.")
 
 if __name__ == "__main__":
     main()
