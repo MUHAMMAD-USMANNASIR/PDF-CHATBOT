@@ -1,12 +1,17 @@
 import streamlit as st
 import PyPDF2
 from sentence_transformers import SentenceTransformer, util
-import torch
+from transformers import pipeline
 
-# Load embedding model once (small, memory-friendly)
+# Load embedding model once
 @st.cache_resource
 def load_embeddings():
     return SentenceTransformer("all-MiniLM-L6-v2")
+
+# Load QA model once (lightweight)
+@st.cache_resource
+def load_qa_model():
+    return pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
 
 # Extract text from PDF
 def extract_text_from_pdf(uploaded_file):
@@ -28,17 +33,19 @@ def search_chunks(query, chunks, embeddings, top_k=3):
     hits = util.semantic_search(query_emb, chunk_embs, top_k=top_k)[0]
     return [chunks[hit['corpus_id']] for hit in hits]
 
-# Generate answers
-def generate_answer(query, chunks, embeddings, mode="concise"):
+# Generate answer using QA model
+def generate_answer(query, chunks, embeddings, qa_model, mode="concise"):
     relevant_chunks = search_chunks(query, chunks, embeddings, top_k=3)
     context = " ".join(relevant_chunks)
 
+    result = qa_model(question=query, context=context)
+
     if mode == "concise":
-        return f"Answer (concise): Based on the PDF, {context[:300]}..."
+        return f"Answer: {result['answer']}"
     elif mode == "deep":
-        return f"Answer (deep): The document discusses in detail: {context}"
+        return f"Answer: {result['answer']}\n\nContext: {context}"
     else:
-        return "Invalid mode selected."
+        return "Invalid mode."
 
 # -------------------- Streamlit UI -------------------- #
 def main():
@@ -48,19 +55,20 @@ def main():
     uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
 
     if uploaded_file:
-        with st.spinner("Reading and processing PDF..."):
+        with st.spinner("Processing PDF..."):
             text = extract_text_from_pdf(uploaded_file)
             chunks = chunk_text(text)
             embeddings = load_embeddings()
+            qa_model = load_qa_model()
 
-        st.success("✅ PDF processed! Ask questions below:")
+        st.success("✅ PDF processed! Ask your questions:")
 
         query = st.text_input("Enter your question:")
         mode = st.radio("Select answer mode:", ["concise", "deep"], horizontal=True)
 
         if query:
             with st.spinner("Generating answer..."):
-                answer = generate_answer(query, chunks, embeddings, mode.lower())
+                answer = generate_answer(query, chunks, embeddings, qa_model, mode.lower())
             st.subheader("💡 Answer")
             st.write(answer)
 
