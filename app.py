@@ -11,7 +11,7 @@ from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Generative QA model
-gen_model_name = "google/flan-t5-large"
+gen_model_name = "facebook/bart-base"
 tokenizer = AutoTokenizer.from_pretrained(gen_model_name)
 gen_model = AutoModelForSeq2SeqLM.from_pretrained(gen_model_name)
 generator = pipeline("text2text-generation", model=gen_model, tokenizer=tokenizer)
