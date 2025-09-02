@@ -60,7 +60,7 @@ def generate_answer(query, chunks, faiss_index, mode="concise"):
 # Streamlit UI
 # -------------------------
 def main():
-    st.title("📄 PDF Q&A Bot (Local Models, No API)")
+    st.title("📄 PDF Q&A Bot")
 
     uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
     if uploaded_file:
