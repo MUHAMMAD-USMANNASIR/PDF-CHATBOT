@@ -68,3 +68,27 @@ if uploaded_file:
     if query:
         answer = retrieve_answer(query, chunks, index)
         st.markdown(f"**Answer:** {answer}")
+
+if uploaded_file:
+    with st.spinner("Processing PDF..."):
+        text = extract_text_from_pdf(uploaded_file)
+
+        if not text:
+            st.error("No text could be extracted from this PDF. Please try another file.")
+        else:
+            chunks = split_text(text)
+            index, _ = build_faiss_index(chunks)
+
+            if index is None:
+                st.error("Failed to build index. The document may not contain readable text.")
+            else:
+                st.success("PDF processed successfully.")
+
+                # Chat section
+                st.subheader("Ask a Question")
+                query = st.text_input("Enter your question:")
+
+                if query:
+                    answer = retrieve_answer(query, chunks, index)
+                    st.markdown(f"**Answer:** {answer}")
+
