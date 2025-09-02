@@ -1,7 +1,6 @@
 streamlit
-PyPDF2
+PyMuPDF
 sentence-transformers
 faiss-cpu
-numpy
 transformers
 torch
