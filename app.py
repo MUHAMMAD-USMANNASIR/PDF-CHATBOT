@@ -44,22 +44,20 @@ def search_chunks(query, chunks, embeddings, model, top_k=5):
 # -----------------------------
 # ANSWER GENERATION
 # -----------------------------
-def generate_answer(query, chunks, embeddings, model, mode="concise"):
-    relevant_chunks = search_chunks(query, chunks, embeddings, model, top_k=3)
-    context = " ".join(relevant_chunks)
+def generate_answer(query, chunks, embeddings, mode="concise"):
+    # Step 1: find most relevant chunks
+    relevant_chunks = search_chunks(query, chunks, embeddings, top_k=5)
+    context = " ".join(relevant_chunks).strip()
+
+    # Step 2: answer ONLY from context
+    if not context:
+        return "Sorry, no relevant answer found in the PDF."
 
     if mode == "concise":
-        generator = pipeline("text-generation", model="distilgpt2")
-        prompt = f"Answer briefly: {query}\nContext: {context}\nAnswer:"
-        return generator(prompt, max_length=100, num_return_sequences=1)[0]["generated_text"]
+        return f"Answer (concise, from PDF): {context[:400]}..."
+    else:  # deep mode
+        return f"Answer (detailed, from PDF):\n\n{context}"
 
-    elif mode == "deep":
-        generator = pipeline("text2text-generation", model="google/flan-t5-base")
-        prompt = f"Answer in detail using the context:\n{context}\nQuestion: {query}\nAnswer:"
-        return generator(prompt, max_length=300, num_return_sequences=1)[0]["generated_text"]
-
-    else:
-        return "Invalid mode selected."
 
 
 # -----------------------------
