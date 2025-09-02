@@ -1,110 +1,93 @@
 import streamlit as st
 import fitz  # PyMuPDF
+from sentence_transformers import SentenceTransformer
 from transformers import pipeline
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-import re
+from sklearn.metrics.pairwise import cosine_similarity
 
-# -------------------------------
-# Load models
-# -------------------------------
-@st.cache_resource
-def load_models():
-    qa_model = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
-    deep_model = pipeline("text2text-generation", model="google/flan-t5-small")
-    emb_model = pipeline("feature-extraction", model="sentence-transformers/all-MiniLM-L6-v2")
-    return qa_model, deep_model, emb_model
 
-qa_model, deep_model, emb_model = load_models()
-
-# -------------------------------
-# PDF text extraction
-# -------------------------------
-def extract_text_from_pdf(uploaded_file):
+# -----------------------------
+# PDF LOADING & CHUNKING
+# -----------------------------
+def load_pdf(file):
+    doc = fitz.open(stream=file.read(), filetype="pdf")
     text = ""
-    with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
-        for page in doc:
-            text += page.get_text("text")
+    for page in doc:
+        text += page.get_text("text")
     return text
 
-def clean_text(text):
-    return re.sub(r"\s+", " ", text).strip()
 
 def chunk_text(text, chunk_size=500):
     words = text.split()
     return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-# -------------------------------
-# Embedding functions
-# -------------------------------
-def embed_chunks(chunks):
-    embeddings = []
-    for ch in chunks:
-        emb = emb_model(ch)[0][0]  # extract vector
-        embeddings.append(np.mean(emb, axis=0))  # pool to single vector
-    return np.array(embeddings)
 
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
+# -----------------------------
+# EMBEDDINGS & SEARCH
+# -----------------------------
+def embed_chunks(chunks, model):
+    return model.encode(chunks)
 
-def search_chunks(query, chunks, embeddings, top_k=5):
-    # Encode query into embedding
-    query_emb = embeddings.encode([query])[0]
 
-    # Ensure both are 2D arrays
-    query_emb = np.array(query_emb).reshape(1, -1)
-    doc_embs = np.array(embeddings.encode(chunks))
+def search_chunks(query, chunks, embeddings, model, top_k=5):
+    # Encode query
+    query_emb = model.encode([query])
 
-    # Compute cosine similarity
-    sims = cosine_similarity(query_emb, doc_embs)[0]
+    # Similarity
+    sims = cosine_similarity(query_emb, embeddings)[0]
 
-    # Get top k indices
+    # Top-k
     top_indices = np.argsort(sims)[-top_k:][::-1]
     return [chunks[i] for i in top_indices]
 
 
-# -------------------------------
-# Answer generation
-# -------------------------------
-def generate_answer(query, chunks, embeddings, mode="concise"):
-    relevant_chunks = search_chunks(query, chunks, embeddings, top_k=5)
+# -----------------------------
+# ANSWER GENERATION
+# -----------------------------
+def generate_answer(query, chunks, embeddings, model, mode="concise"):
+    relevant_chunks = search_chunks(query, chunks, embeddings, model, top_k=3)
     context = " ".join(relevant_chunks)
 
     if mode == "concise":
-        result = qa_model({"question": query, "context": context})
-        return result["answer"]
+        generator = pipeline("text-generation", model="distilgpt2")
+        prompt = f"Answer briefly: {query}\nContext: {context}\nAnswer:"
+        return generator(prompt, max_length=100, num_return_sequences=1)[0]["generated_text"]
 
     elif mode == "deep":
-        prompt = f"Answer the question in detail using the context.\n\nContext: {context}\n\nQuestion: {query}\nAnswer:"
-        output = deep_model(prompt, max_length=300, do_sample=False)[0]["generated_text"]
-        return output.strip()
+        generator = pipeline("text2text-generation", model="google/flan-t5-base")
+        prompt = f"Answer in detail using the context:\n{context}\nQuestion: {query}\nAnswer:"
+        return generator(prompt, max_length=300, num_return_sequences=1)[0]["generated_text"]
 
-# -------------------------------
-# Streamlit UI
-# -------------------------------
+    else:
+        return "Invalid mode selected."
+
+
+# -----------------------------
+# STREAMLIT APP
+# -----------------------------
 def main():
-    st.set_page_config(page_title="PDF Q/A Chatbot", layout="wide")
-    st.title("📑 PDF Q/A Chatbot")
+    st.title("📘 PDF Q&A Chatbot")
+    st.write("Upload a PDF and ask questions from it!")
 
-    uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+    uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
+
     if uploaded_file:
-        text = extract_text_from_pdf(uploaded_file)
-        cleaned = clean_text(text)
-        chunks = chunk_text(cleaned, chunk_size=500)
-        embeddings = embed_chunks(chunks)
+        text = load_pdf(uploaded_file)
+        st.success("PDF loaded successfully!")
 
-        st.success("✅ PDF processed! Ask your questions below.")
+        chunks = chunk_text(text)
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        embeddings = embed_chunks(chunks, model)
 
-        mode = st.radio("Answer Mode:", ["Concise", "Deep"], horizontal=True)
-        query = st.text_input("Enter your question:")
+        query = st.text_input("Ask a question about the PDF:")
+        mode = st.radio("Select answer mode:", ["concise", "deep"])
 
-        if st.button("Get Answer"):
-            if query:
-                answer = generate_answer(query, chunks, embeddings, mode.lower())
-                st.subheader("Answer:")
+        if st.button("Get Answer") and query:
+            with st.spinner("Generating answer..."):
+                answer = generate_answer(query, chunks, embeddings, model, mode.lower())
+                st.write("### Answer:")
                 st.write(answer)
-            else:
-                st.warning("Please enter a question.")
+
 
 if __name__ == "__main__":
     main()
