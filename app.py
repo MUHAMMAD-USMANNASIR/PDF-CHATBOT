@@ -1,91 +1,96 @@
 import streamlit as st
-import fitz  # PyMuPDF
-from sentence_transformers import SentenceTransformer
+import os
+import tempfile
+import PyPDF2
+import openai
+import faiss
 import numpy as np
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 
-# ----------------------------
-# 1. Load embedding model
-# ----------------------------
-@st.cache_resource
-def load_embeddings():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+# -------------------------
+# Embedding & QA Models
+# -------------------------
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+qa_pipeline = pipeline("question-answering", model="distilbert-base-uncased-distilled-squad")
 
-# ----------------------------
-# 2. Extract text from PDF
-# ----------------------------
-def extract_text_from_pdf(uploaded_file):
-    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+# -------------------------
+# Utility Functions
+# -------------------------
+def load_pdf(pdf_file):
+    """Extract text from uploaded PDF file."""
+    pdf_reader = PyPDF2.PdfReader(pdf_file)
     text = ""
-    for page in doc:
-        text += page.get_text("text") + " "
-    return text.strip()
+    for page in pdf_reader.pages:
+        text += page.extract_text() + "\n"
+    return text
 
-# ----------------------------
-# 3. Chunk text
-# ----------------------------
-def chunk_text(text, chunk_size=500):
+def split_text(text, chunk_size=500):
+    """Split text into smaller chunks for embedding."""
     words = text.split()
     return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-# ----------------------------
-# 4. Build embeddings
-# ----------------------------
-def build_embeddings(chunks, model):
-    vectors = model.encode(chunks, convert_to_tensor=True).cpu().numpy()
-    return vectors
+def build_faiss_index(chunks):
+    """Build FAISS index for chunk embeddings."""
+    embeddings = embedding_model.encode(chunks, convert_to_numpy=True)
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+    return index, embeddings
 
-# ----------------------------
-# 5. Search relevant chunks
-# ----------------------------
-def search_chunks(query, chunks, embeddings, model, top_k=3):
-    query_vec = model.encode([query], convert_to_tensor=True).cpu().numpy()[0]
-    scores = np.dot(embeddings, query_vec) / (
-        np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec)
-    )
-    top_ids = np.argsort(scores)[::-1][:top_k]
-    return [chunks[i] for i in top_ids]
+def search_chunks(query, chunks, embeddings, top_k=3):
+    """Retrieve most relevant chunks for a query."""
+    query_vec = embedding_model.encode([query], convert_to_numpy=True)
+    scores, indices = embeddings.search(query_vec, top_k)
+    return [chunks[i] for i in indices[0]]
 
-# ----------------------------
-# 6. Generate answer (retrieval only)
-# ----------------------------
-def generate_answer(query, chunks, embeddings, embed_model, mode="concise"):
-    relevant_chunks = search_chunks(query, chunks, embeddings, embed_model, top_k=3)
-    
+def generate_answer(query, chunks, faiss_index, mode="concise"):
+    """Generate final answer using retriever + QA model."""
+    # Retrieve relevant chunks
+    query_vec = embedding_model.encode([query], convert_to_numpy=True)
+    scores, indices = faiss_index.search(query_vec, 3)
+    relevant_chunks = [chunks[i] for i in indices[0]]
+    context = " ".join(relevant_chunks)
+
+    # Extract short answer from context
+    try:
+        result = qa_pipeline(question=query, context=context)
+        answer = result["answer"]
+    except Exception:
+        answer = "Sorry, I couldn’t find an exact answer."
+
+    # Return based on mode
     if mode == "concise":
-        return f"Answer (from PDF): {relevant_chunks[0]}"
-    
-    elif mode == "deep":
-        return "Answer (from PDF):\n\n" + "\n\n".join(relevant_chunks)
-    
+        return answer
     else:
-        return "❌ Invalid mode."
+        return f"Answer: {answer}\n\nContext: {context}"
 
-# ----------------------------
-# 7. Streamlit UI
-# ----------------------------
+# -------------------------
+# Streamlit UI
+# -------------------------
 def main():
-    st.title("📄 PDF Q&A Bot (Retriever Only)")
+    st.title("📄 PDF Q&A Bot (Retriever + QA Model)")
 
     uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
-
     if uploaded_file:
-        with st.spinner("Extracting text..."):
-            pdf_text = extract_text_from_pdf(uploaded_file)
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            tmp_path = tmp_file.name
 
-        chunks = chunk_text(pdf_text, chunk_size=500)
-        embed_model = load_embeddings()
-
-        with st.spinner("Building embeddings..."):
-            embeddings = build_embeddings(chunks, embed_model)
+        # Extract & process PDF
+        text = load_pdf(tmp_path)
+        chunks = split_text(text)
+        faiss_index, _ = build_faiss_index(chunks)
 
         st.success("✅ PDF processed successfully!")
 
+        # Query input
         query = st.text_input("Ask a question about your PDF:")
         mode = st.radio("Answer Mode:", ["concise", "deep"])
 
         if query:
-            with st.spinner("Searching..."):
-                answer = generate_answer(query, chunks, embeddings, embed_model, mode)
+            answer = generate_answer(query, chunks, faiss_index, mode.lower())
+            st.markdown("### Answer (from PDF):")
             st.write(answer)
 
 if __name__ == "__main__":
