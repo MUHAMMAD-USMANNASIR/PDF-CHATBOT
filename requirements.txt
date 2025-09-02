@@ -1,5 +1,6 @@
 streamlit
-PyPDF2
-sentence-transformers
-faiss-cpu
+PyMuPDF
 transformers
+torch
+scikit-learn
+sentence-transformers
