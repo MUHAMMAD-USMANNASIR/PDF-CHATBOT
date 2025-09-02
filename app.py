@@ -1,75 +1,104 @@
 import streamlit as st
-import PyPDF2
-from sentence_transformers import SentenceTransformer, util
+import fitz  # PyMuPDF
+from sentence_transformers import SentenceTransformer
+import numpy as np
 from transformers import pipeline
 
-# Load embedding model once
+# ----------------------------
+# 1. Load models (cached)
+# ----------------------------
 @st.cache_resource
 def load_embeddings():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
-# Load QA model once (lightweight)
 @st.cache_resource
-def load_qa_model():
-    return pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
+def load_summarizer():
+    return pipeline("summarization", model="t5-small")
 
-# Extract text from PDF
+# ----------------------------
+# 2. Extract text from PDF
+# ----------------------------
 def extract_text_from_pdf(uploaded_file):
-    pdf_reader = PyPDF2.PdfReader(uploaded_file)
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text() or ""
-    return text
+    for page in doc:
+        text += page.get_text("text") + " "
+    return text.strip()
 
-# Split text into chunks
+# ----------------------------
+# 3. Chunk text
+# ----------------------------
 def chunk_text(text, chunk_size=500):
     words = text.split()
-    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-# Search top-k relevant chunks
-def search_chunks(query, chunks, embeddings, top_k=3):
-    chunk_embs = embeddings.encode(chunks, convert_to_tensor=True)
-    query_emb = embeddings.encode(query, convert_to_tensor=True)
-    hits = util.semantic_search(query_emb, chunk_embs, top_k=top_k)[0]
-    return [chunks[hit['corpus_id']] for hit in hits]
+# ----------------------------
+# 4. Build embeddings
+# ----------------------------
+def build_embeddings(chunks, model):
+    vectors = model.encode(chunks, convert_to_tensor=True).cpu().numpy()
+    return vectors
 
-# Generate answer using QA model
-def generate_answer(query, chunks, embeddings, qa_model, mode="concise"):
-    relevant_chunks = search_chunks(query, chunks, embeddings, top_k=3)
+# ----------------------------
+# 5. Search chunks
+# ----------------------------
+def search_chunks(query, chunks, embeddings, model, top_k=3):
+    query_vec = model.encode([query], convert_to_tensor=True).cpu().numpy()[0]
+    scores = np.dot(embeddings, query_vec) / (
+        np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec)
+    )
+    top_ids = np.argsort(scores)[::-1][:top_k]
+    return [chunks[i] for i in top_ids]
+
+# ----------------------------
+# 6. Generate answer
+# ----------------------------
+def generate_answer(query, chunks, embeddings, embed_model, summarizer, mode="concise"):
+    relevant_chunks = search_chunks(query, chunks, embeddings, embed_model, top_k=3)
     context = " ".join(relevant_chunks)
 
-    result = qa_model(question=query, context=context)
-
     if mode == "concise":
-        return f"Answer: {result['answer']}"
+        summary = summarizer(
+            context, max_length=50, min_length=15, do_sample=False
+        )[0]["summary_text"]
+        return f"Answer: {summary}"
+
     elif mode == "deep":
-        return f"Answer: {result['answer']}\n\nContext: {context}"
+        summary = summarizer(
+            context, max_length=120, min_length=50, do_sample=False
+        )[0]["summary_text"]
+        return f"Answer: {summary}\n\n(Context from PDF: {context})"
+
     else:
-        return "Invalid mode."
+        return "❌ Invalid mode."
 
-# -------------------- Streamlit UI -------------------- #
+# ----------------------------
+# 7. Streamlit UI
+# ----------------------------
 def main():
-    st.set_page_config(page_title="PDF Q&A Bot", layout="wide")
-    st.title("📘 PDF Q&A Chatbot")
+    st.title("📄 PDF Q&A Bot (Retriever + Summarizer)")
 
-    uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
+    uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
     if uploaded_file:
-        with st.spinner("Processing PDF..."):
-            text = extract_text_from_pdf(uploaded_file)
-            chunks = chunk_text(text)
-            embeddings = load_embeddings()
-            qa_model = load_qa_model()
+        with st.spinner("Extracting text..."):
+            pdf_text = extract_text_from_pdf(uploaded_file)
 
-        st.success("✅ PDF processed! Ask your questions:")
+        chunks = chunk_text(pdf_text, chunk_size=500)
+        embed_model = load_embeddings()
+        summarizer = load_summarizer()
 
-        query = st.text_input("Enter your question:")
-        mode = st.radio("Select answer mode:", ["concise", "deep"], horizontal=True)
+        with st.spinner("Building embeddings..."):
+            embeddings = build_embeddings(chunks, embed_model)
+
+        st.success("✅ PDF processed successfully!")
+
+        query = st.text_input("Ask a question about your PDF:")
+        mode = st.radio("Answer Mode:", ["concise", "deep"])
 
         if query:
-            with st.spinner("Generating answer..."):
-                answer = generate_answer(query, chunks, embeddings, qa_model, mode.lower())
-            st.subheader("💡 Answer")
+            with st.spinner("Searching & summarizing..."):
+                answer = generate_answer(query, chunks, embeddings, embed_model, summarizer, mode)
             st.write(answer)
 
 if __name__ == "__main__":
